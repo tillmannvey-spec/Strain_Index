@@ -1,22 +1,60 @@
+/**
+ * ============================================================================
+ * IMPORT MODAL KOMPONENTE
+ * ============================================================================
+ * 
+ * Diese Komponente bietet zwei Möglichkeiten, um Strains hinzuzufügen:
+ * 
+ * 1. TEXT IMPORT: Füge mehrere Strains per Copy & Paste aus Text ein
+ * 2. AUTO-RESEARCH: Recherchiere automatisch einen Strain per Name
+ * 
+ * Tabs ermöglichen einfaches Umschalten zwischen den Modi.
+ * ============================================================================
+ */
+
 'use client';
 
 import { useState, useCallback } from 'react';
-import { Upload, X, AlertCircle, CheckCircle, FileText, ChevronDown, ChevronUp } from 'lucide-react';
+import { 
+  Upload, X, AlertCircle, CheckCircle, FileText, 
+  ChevronDown, ChevronUp, Sparkles, FileInput 
+} from 'lucide-react';
 import { parseMultipleStrains, validateStrain, createStrainFromParsed } from '@/app/lib/import';
 import { Strain } from '@/app/types/strain';
 import { useStrains } from '@/app/hooks/useStrains';
 
+// Importiere die neue Research-Komponente
+import { StrainResearch } from './StrainResearch';
+
+/**
+ * Props für den ImportModal
+ */
 interface ImportModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
+/**
+ * Verfügbare Tabs im ImportModal
+ */
+type ImportTab = 'text' | 'research';
+
 export function ImportModal({ isOpen, onClose }: ImportModalProps) {
+  // =======================================================================
+  // ZUSTAND
+  // =======================================================================
+  
+  // Aktiver Tab (Text Import oder Auto-Research)
+  const [activeTab, setActiveTab] = useState<ImportTab>('text');
+  
+  // States für Text Import
   const [text, setText] = useState('');
   const [previewStrains, setPreviewStrains] = useState<Partial<Strain>[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [imported, setImported] = useState(false);
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
+  
+  // Hook zum Speichern von Strains
   const { addStrain } = useStrains();
 
   const handleTextChange = useCallback((value: string) => {
@@ -42,6 +80,10 @@ export function ImportModal({ isOpen, onClose }: ImportModalProps) {
     }
   }, []);
 
+  /**
+   * Handler für Text-Import
+   * Speichert alle validierten Strains aus dem Text-Import
+   */
   const handleImport = useCallback(async () => {
     let successCount = 0;
     
@@ -58,12 +100,27 @@ export function ImportModal({ isOpen, onClose }: ImportModalProps) {
       setImported(true);
       setTimeout(() => {
         onClose();
+        // Reset states
         setText('');
         setPreviewStrains([]);
         setImported(false);
+        setActiveTab('text');
       }, 1500);
     }
   }, [previewStrains, addStrain, onClose]);
+
+  /**
+   * Handler für Auto-Research
+   * Speichert einen recherchierten Strain
+   */
+  const handleResearchSave = useCallback(async (strain: Strain) => {
+    await addStrain(strain);
+    setImported(true);
+    setTimeout(() => {
+      onClose();
+      setImported(false);
+    }, 1500);
+  }, [addStrain, onClose]);
 
   const toggleExpand = (index: number) => {
     setExpandedIndex(expandedIndex === index ? null : index);
@@ -84,8 +141,8 @@ export function ImportModal({ isOpen, onClose }: ImportModalProps) {
               <Upload className="w-5 h-5 text-green-400" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-white">Strains importieren</h2>
-              <p className="text-sm text-zinc-400">Füge deine Text-Daten ein</p>
+              <h2 className="text-lg font-semibold text-white">Strains hinzufügen</h2>
+              <p className="text-sm text-zinc-400">Importiere oder recherchiere Strains</p>
             </div>
           </div>
           <button
@@ -96,8 +153,55 @@ export function ImportModal({ isOpen, onClose }: ImportModalProps) {
           </button>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        {/* Tabs */}
+        <div className="flex border-b border-zinc-800">
+          <button
+            onClick={() => setActiveTab('text')}
+            className={`flex-1 px-6 py-3 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
+              activeTab === 'text'
+                ? 'text-green-400 border-b-2 border-green-400 bg-green-500/5'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'
+            }`}
+          >
+            <FileInput className="w-4 h-4" />
+            Text Import
+          </button>
+          <button
+            onClick={() => setActiveTab('research')}
+            className={`flex-1 px-6 py-3 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
+              activeTab === 'research'
+                ? 'text-green-400 border-b-2 border-green-400 bg-green-500/5'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-800/50'
+            }`}
+          >
+            <Sparkles className="w-4 h-4" />
+            Auto-Research
+          </button>
+        </div>
+
+        {/* Content - Je nach aktivem Tab */}
+        <div className="flex-1 overflow-y-auto">
+          {activeTab === 'text' ? (
+            <TextImportTab />
+          ) : (
+            <ResearchTab />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  // =======================================================================
+  // SUB-KOMPONENTEN FÜR DIE BEIDEN TABS
+  // =======================================================================
+
+  /**
+   * Text Import Tab Inhalt
+   */
+  function TextImportTab() {
+    return (
+      <>
+        <div className="p-6 space-y-4">
           {/* Text Input */}
           <div>
             <label className="block text-sm font-medium text-zinc-300 mb-2">
@@ -288,7 +392,31 @@ B) Medizinische Anwendungen
             </button>
           )}
         </div>
+      </>
+    );
+  }
+
+  /**
+   * Auto-Research Tab Inhalt
+   */
+  function ResearchTab() {
+    return (
+      <div className="p-6">
+        {imported ? (
+          <div className="flex flex-col items-center justify-center py-12">
+            <div className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center mb-4">
+              <CheckCircle className="w-8 h-8 text-green-400" />
+            </div>
+            <h3 className="text-xl font-semibold text-white mb-2">Gespeichert!</h3>
+            <p className="text-zinc-400">Der Strain wurde erfolgreich zur Datenbank hinzugefügt.</p>
+          </div>
+        ) : (
+          <StrainResearch 
+            onSave={handleResearchSave}
+            onCancel={onClose}
+          />
+        )}
       </div>
-    </div>
-  );
+    );
+  }
 }

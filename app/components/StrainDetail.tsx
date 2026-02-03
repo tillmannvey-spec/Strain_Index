@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Strain } from '../types/strain';
+import { Strain, getImageDisplayUrl } from '../types/strain';
 
 interface StrainDetailProps {
   strain: Strain;
@@ -31,9 +31,15 @@ export default function StrainDetail({ strain, onEdit, onDelete }: StrainDetailP
       <div className="relative">
         {/* Background Image or Gradient */}
         <div className="h-64 sm:h-80 relative overflow-hidden">
+          {/* 
+            Bildanzeige mit Abwärtskompatibilität
+            Unterstützt sowohl neue Blob URLs als auch alte Base64 Bilder
+          */}
           {strain.images && strain.images.length > 0 ? (
             <img
-              src={strain.images.find((i: { isPrimary: boolean }) => i.isPrimary)?.dataUrl || strain.images[0].dataUrl}
+              src={getImageDisplayUrl(
+                strain.images.find((i) => i.isPrimary) || strain.images[0]
+              )}
               alt={strain.name}
               className="w-full h-full object-cover"
             />
@@ -115,6 +121,14 @@ export default function StrainDetail({ strain, onEdit, onDelete }: StrainDetailP
           </section>
         )}
 
+        {/* Detaillierte Analyse */}
+        {strain.detailedAnalysis && (
+          <section className="animate-fade-in" style={{ animationDelay: '125ms' }}>
+            <h2 className="text-lg font-semibold text-white mb-3">Detaillierte Analyse</h2>
+            <DetailedAnalysisSection analysis={strain.detailedAnalysis} />
+          </section>
+        )}
+
         {/* Effects */}
         <section className="animate-fade-in" style={{ animationDelay: '150ms' }}>
           <h2 className="text-lg font-semibold text-white mb-4">Wirkungen</h2>
@@ -193,6 +207,102 @@ export default function StrainDetail({ strain, onEdit, onDelete }: StrainDetailP
           </div>
         </section>
       </div>
+    </div>
+  );
+}
+
+/**
+ * ============================================================================
+ * DETAILED ANALYSIS SECTION KOMPONENTE
+ * ============================================================================
+ *
+ * Zeigt die detaillierte Review-Analyse in der Strain-Detailansicht an.
+ * Unterstützt Markdown-ähnliche Formatierung und Expand/Collapse.
+ */
+
+interface DetailedAnalysisSectionProps {
+  /** Der ausführliche Analyse-Text */
+  analysis: string;
+}
+
+/**
+ * Formatiert Markdown-ähnliche Syntax zu React-Elementen
+ * Unterstützt: **fett**, Zeilenumbrüche
+ */
+function formatAnalysisText(text: string): React.ReactNode {
+  const lines = text.split('\n');
+
+  return lines.map((line, index) => {
+    // Überspringe leere Zeilen
+    if (line.trim() === '') {
+      return <div key={index} className="h-3" />;
+    }
+
+    // Ersetze **fett** mit <strong>
+    let formattedLine = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    // Erkenne Überschriften (Zeilen, die mit ** beginnen und enden)
+    const isHeading = line.startsWith('**') && line.endsWith('**');
+
+    return (
+      <p
+        key={index}
+        className={`${isHeading ? 'font-semibold text-white mt-4 first:mt-0' : 'text-white/70'} mb-2 leading-relaxed`}
+        dangerouslySetInnerHTML={{ __html: formattedLine }}
+      />
+    );
+  });
+}
+
+/**
+ * Zeigt die detaillierte Analyse mit Expand/Collapse Funktionalität
+ */
+function DetailedAnalysisSection({ analysis }: DetailedAnalysisSectionProps) {
+  // State für Expand/Collapse
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  // Konstanten für die Text-Längen
+  const MAX_PREVIEW_LENGTH = 400;
+  const MIN_LENGTH_FOR_COLLAPSE = 500;
+
+  // Prüfe, ob Collapse notwendig ist
+  const shouldShowCollapseButton = analysis.length > MIN_LENGTH_FOR_COLLAPSE;
+
+  // Bestimme den anzuzeigenden Text
+  const displayText = isExpanded || !shouldShowCollapseButton
+    ? analysis
+    : analysis.substring(0, MAX_PREVIEW_LENGTH) + '...';
+
+  return (
+    <div className="p-4 rounded-xl bg-cyan-500/10 border border-cyan-500/20">
+      {/* Analyse-Text mit Formatierung */}
+      <div className="text-sm">
+        {formatAnalysisText(displayText)}
+      </div>
+
+      {/* Mehr/Weniger anzeigen Button */}
+      {shouldShowCollapseButton && (
+        <button
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="mt-4 flex items-center gap-1 text-sm text-cyan-400 hover:text-cyan-300 transition-colors"
+        >
+          {isExpanded ? (
+            <>
+              <span>Weniger anzeigen</span>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+              </svg>
+            </>
+          ) : (
+            <>
+              <span>Mehr anzeigen</span>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </>
+          )}
+        </button>
+      )}
     </div>
   );
 }

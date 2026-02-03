@@ -3,11 +3,14 @@
 
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
 import { Strain } from '../types/strain';
+// NEU: Importiere die Blob-Funktionen für Cloud-Speicher
+import { deleteImageFromBlob } from './images';
 
 const DB_NAME = 'strain-index-db';
 const DB_VERSION = 1;
 
 // Database schema definition
+// WICHTIG: Dieses Schema wurde aktualisiert für Vercel Blob Support!
 interface StrainIndexDB extends DBSchema {
   strains: {
     key: string;
@@ -21,7 +24,8 @@ interface StrainIndexDB extends DBSchema {
     key: string;
     value: {
       id: string;
-      dataUrl: string;
+      dataUrl?: string;    // Optional: Base64 (legacy)
+      blobUrl?: string;    // Optional: Vercel Blob URL (neu)
       createdAt: Date;
     };
   };
@@ -94,15 +98,27 @@ export async function updateStrain(id: string, strainUpdate: Partial<Strain>): P
 export async function deleteStrain(id: string): Promise<void> {
   const database = await initDB();
   
-  // First delete associated images
+  // Zuerst zugehörige Bilder löschen
   const strain = await database.get('strains', id);
   if (strain?.images) {
     for (const image of strain.images) {
-      await database.delete('images', image.id);
+      // NEU: Auch aus Vercel Blob löschen wenn es eine Blob URL ist
+      const imageUrl = image.url || image.dataUrl;
+      if (imageUrl) {
+        await deleteImage(image.id, imageUrl);
+      } else {
+        await database.delete('images', image.id);
+      }
     }
   }
   
-  // Then delete the strain
+  // Auch das legacy 'image' Feld prüfen (Base64)
+  if (strain?.image) {
+    // Legacy Base64 Bild - nichts in Blob zu löschen
+    console.log('[DB] Legacy image field detected, skipping Blob delete');
+  }
+  
+  // Dann den Strain löschen
   await database.delete('strains', id);
   console.log('[DB] Deleted strain:', id);
 }
@@ -121,28 +137,141 @@ export async function getStrainById(id: string): Promise<Strain | undefined> {
   return database.get('strains', id);
 }
 
-// Image Operations
+// ============================================================================
+// Image Operations - MIT VERCEL BLOB SUPPORT
+// ============================================================================
+// Diese Funktionen unterstützen jetzt beide Speicherarten:
+// 1. NEU: Vercel Blob URLs (Cloud-Speicher)
+// 2. ALT: Base64 in IndexedDB (lokaler Speicher)
+// ============================================================================
 
-export async function saveImage(id: string, base64: string): Promise<void> {
+/**
+ * Speichert ein Bild in der Datenbank
+ * 
+ * WICHTIG: Diese Funktion wird jetzt anders verwendet!
+ * 
+ * ALT (Base64):
+ *   await saveImage('id-123', 'data:image/jpeg;base64,/9j/4AAQ...');
+ * 
+ * NEU (Blob URL):
+ *   await saveImage('id-123', 'https://xxx.blob.vercel-storage.com/bild.jpg');
+ * 
+ * @param id - Eindeutige ID des Bildes
+ * @param imageUrl - Entweder Base64-String oder Vercel Blob URL
+ */
+export async function saveImage(id: string, imageUrl: string): Promise<void> {
   const database = await initDB();
-  await database.put('images', {
-    id,
-    dataUrl: base64,
-    createdAt: new Date(),
-  });
-  console.log('[DB] Saved image:', id);
+  
+  // Prüfen ob es eine Blob URL oder Base64 ist
+  const isBlobUrl = imageUrl.startsWith('http') && imageUrl.includes('blob.vercel-storage.com');
+  
+  if (isBlobUrl) {
+    // NEU: Blob URLs werden nur als Referenz gespeichert
+    // Das eigentliche Bild ist in der Cloud
+    await database.put('images', {
+      id,
+      dataUrl: undefined, // Kein Base64 mehr nötig!
+      blobUrl: imageUrl,  // Die Blob URL wird gespeichert
+      createdAt: new Date(),
+    });
+    console.log('[DB] Saved Blob URL reference:', id);
+  } else {
+    // ALT: Base64 wird weiterhin unterstützt (Abwärtskompatibilität)
+    await database.put('images', {
+      id,
+      dataUrl: imageUrl,  // Base64 String
+      blobUrl: undefined,
+      createdAt: new Date(),
+    });
+    console.log('[DB] Saved Base64 image (legacy):', id);
+  }
 }
 
+/**
+ * Holt ein Bild aus der Datenbank
+ * 
+ * @param id - ID des gesuchten Bildes
+ * @returns Die Bild-URL (Blob URL oder Base64) oder undefined
+ * 
+ * HINWEIS: Diese Funktion gibt jetzt beide Formate zurück:
+ * - Blob URLs (neu, bevorzugt)
+ * - Base64 (legacy, für alte Bilder)
+ */
 export async function getImage(id: string): Promise<string | undefined> {
   const database = await initDB();
   const record = await database.get('images', id);
-  return record?.dataUrl;
+  
+  if (!record) {
+    return undefined;
+  }
+  
+  // NEU: Wenn es eine Blob URL gibt, die zurückgeben
+  if (record.blobUrl) {
+    return record.blobUrl;
+  }
+  
+  // ALT: Sonst Base64 zurückgeben (Abwärtskompatibilität)
+  return record.dataUrl;
 }
 
-export async function deleteImage(id: string): Promise<void> {
+/**
+ * Löscht ein Bild aus der Datenbank UND aus Vercel Blob
+ * 
+ * WICHTIG: Bei Blob URLs wird das Bild auch aus der Cloud gelöscht!
+ * Bei Base64 wird nur der lokale Eintrag entfernt.
+ * 
+ * @param id - ID des zu löschenden Bildes
+ * @param imageUrl - Optional: Die URL um zu prüfen ob es ein Blob ist
+ */
+export async function deleteImage(id: string, imageUrl?: string): Promise<void> {
   const database = await initDB();
+  
+  // Wenn eine URL übergeben wurde, prüfen ob es ein Blob ist
+  if (imageUrl) {
+    const isBlobUrl = imageUrl.includes('blob.vercel-storage.com');
+    
+    if (isBlobUrl) {
+      try {
+        // Aus Vercel Blob löschen
+        await deleteImageFromBlob(imageUrl);
+        console.log('[DB] Deleted from Vercel Blob:', imageUrl);
+      } catch (error) {
+        // Fehler beim Blob-Löschen protokollieren, aber fortsetzen
+        // (Bild könnte schon gelöscht sein)
+        console.warn('[DB] Could not delete from Blob (may already be deleted):', error);
+      }
+    }
+  }
+  
+  // Aus IndexedDB löschen
   await database.delete('images', id);
-  console.log('[DB] Deleted image:', id);
+  console.log('[DB] Deleted image from IndexedDB:', id);
+}
+
+/**
+ * Löscht ALLE Bilder eines Strains (inkl. aus Vercel Blob)
+ * 
+ * Diese Funktion wird beim Löschen eines Strains verwendet,
+ * um alle zugehörigen Bilder zu bereinigen.
+ * 
+ * @param imageUrls - Array von Bild-URLs (können Blob oder Base64 sein)
+ */
+export async function deleteImages(imageUrls: string[]): Promise<void> {
+  for (const url of imageUrls) {
+    // Prüfen ob es eine Blob URL ist
+    const isBlobUrl = url.includes('blob.vercel-storage.com');
+    
+    if (isBlobUrl) {
+      try {
+        await deleteImageFromBlob(url);
+        console.log('[DB] Deleted from Blob:', url);
+      } catch (error) {
+        console.warn('[DB] Blob delete error (continuing):', error);
+      }
+    }
+    // Base64 Bilder werden nur aus dem Strain entfernt,
+    // da sie direkt im Strain-Objekt gespeichert sind
+  }
 }
 
 // Database utilities
@@ -190,7 +319,10 @@ export async function getDBStats(): Promise<{
     totalBytes += JSON.stringify(strain).length * 2; // UTF-16
   }
   for (const image of images) {
-    totalBytes += image.dataUrl.length * 2;
+    // NEU: Unterstützt sowohl Base64 als auch Blob URLs
+    // Blob URLs sind kurze Strings, Base64 sind lange Strings
+    const imageData = image.dataUrl || image.blobUrl || '';
+    totalBytes += imageData.length * 2;
   }
   
   const estimatedSize = totalBytes > 1024 * 1024 

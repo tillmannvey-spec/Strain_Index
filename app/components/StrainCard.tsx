@@ -2,7 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { Strain } from '../types/strain';
+import { Strain, getImageDisplayUrl } from '../types/strain';
 
 interface StrainCardProps {
   strain: Strain;
@@ -33,9 +33,15 @@ export default function StrainCard({ strain, index = 0 }: StrainCardProps) {
         <div className="flex gap-4 p-4">
           {/* Image Placeholder or Actual Image */}
           <div className="relative flex-shrink-0 w-20 h-20 rounded-xl overflow-hidden bg-gradient-to-br from-green-900/40 to-green-800/20 border border-green-500/20">
+            {/* 
+              Bildanzeige mit Abwärtskompatibilität
+              Unterstützt sowohl neue Blob URLs als auch alte Base64 Bilder
+            */}
             {strain.images && strain.images.length > 0 ? (
               <img
-                src={strain.images.find((i: { isPrimary: boolean }) => i.isPrimary)?.dataUrl || strain.images[0].dataUrl}
+                src={getImageDisplayUrl(
+                  strain.images.find((i) => i.isPrimary) || strain.images[0]
+                )}
                 alt={strain.name}
                 className="w-full h-full object-cover"
               />
