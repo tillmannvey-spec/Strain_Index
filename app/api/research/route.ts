@@ -8,17 +8,46 @@
  * 
  * ENDPUNKT: POST /api/research
  * 
- * REQUEST BODY:
+ * REQUEST BODY (Einzelner Strain):
  * {
  *   "name": "Alien Mints Huala",      // REQUIRED - Name des Strains
  *   "producer": "Seed Junky",         // OPTIONAL - Hersteller/Züchter
  *   "thcContent": "27%"               // OPTIONAL - THC-Gehalt
  * }
  * 
- * RESPONSE (Erfolg):
+ * REQUEST BODY (Batch - Mehrere Strains):
+ * {
+ *   "strains": [                      // REQUIRED - Array von Strains
+ *     {
+ *       "name": "Alien Mints Huala",
+ *       "producer": "Seed Junky",
+ *       "thcContent": "27%"
+ *     },
+ *     {
+ *       "name": "OG Kush",
+ *       "producer": "Unknown"
+ *     }
+ *   ]
+ * }
+ * 
+ * RESPONSE (Einzelner Strain - Erfolg):
  * {
  *   "success": true,
  *   "data": { ...Strain Objekt mit allen Recherche-Daten... }
+ * }
+ * 
+ * RESPONSE (Batch - Erfolg):
+ * {
+ *   "success": true,
+ *   "data": [
+ *     { "success": true, "strain": {...} },
+ *     { "success": false, "error": "Nicht gefunden", "requestedName": "OG Kush" }
+ *   ],
+ *   "summary": {
+ *     "total": 2,
+ *     "successful": 1,
+ *     "failed": 1
+ *   }
  * }
  * 
  * RESPONSE (Fehler):
@@ -35,7 +64,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // Importiere unseren Research-Service mit OpenRouter Integration
-import { researchStrain, simulateDelay } from '@/app/lib/research';
+import { researchStrain, researchMultipleStrains, simulateDelay, BatchResearchResult } from '@/app/lib/research';
 
 /**
  * POST Handler - Verarbeitet Research-Anfragen
@@ -93,11 +122,36 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
   
   // =======================================================================
-  // SCHRITT 3: Validierung der Eingabedaten
-  // Wir prüfen, ob alle erforderlichen Felder vorhanden sind
+  // SCHRITT 3: Unterscheidung zwischen Einzel- und Batch-Request
+  // Prüfe, ob es ein Batch-Request (strains Array) oder Einzel-Request ist
   // =======================================================================
   
-  const { name, producer, thcContent } = requestData;
+  const { strains, name, producer, thcContent } = requestData;
+  
+  // Wenn ein 'strains' Array vorhanden ist, verarbeite als Batch
+  if (strains && Array.isArray(strains)) {
+    return handleBatchRequest(strains, apiKey);
+  }
+  
+  // Ansonsten verarbeite als Einzel-Request
+  return handleSingleRequest(name, producer, thcContent, apiKey);
+}
+
+/**
+ * =============================================================================
+ * HELFERFUNKTION: Einzelner Strain Request
+ * =============================================================================
+ */
+async function handleSingleRequest(
+  name: string,
+  producer: string | undefined,
+  thcContent: string | undefined,
+  apiKey: string
+): Promise<NextResponse> {
+  
+  // =======================================================================
+  // SCHRITT 1: Validierung der Eingabedaten
+  // =======================================================================
   
   // Prüfe, ob der Name vorhanden ist
   if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -143,27 +197,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
   
   // =======================================================================
-  // SCHRITT 4: Research durchführen
-  // Wir rufen unseren Research-Service mit dem API Key auf
+  // SCHRITT 2: Research durchführen
   // =======================================================================
   
   try {
     // Simuliere eine kurze Verzögerung für bessere UX
-    // (zeigt dem User, dass "etwas passiert")
     await simulateDelay(500);
     
     // Rufe den Research-Service auf mit dem API Key
-    // Dieser führt die echte Recherche via OpenRouter durch
     const strainData = await researchStrain(
       name.trim(),
       producer?.trim(),
       thcContent?.trim(),
-      apiKey // Übergebe den API Key an den Service
+      apiKey
     );
     
     // =======================================================================
-    // SCHRITT 5: Erfolgreiche Response
-    // Wir geben die recherchierten Daten zurück
+    // SCHRITT 3: Erfolgreiche Response
     // =======================================================================
     
     return NextResponse.json(
@@ -173,25 +223,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         message: `Erfolgreich Deep Research für "${name}" durchgeführt.`,
         source: 'OpenRouter API (Kimi K2.5)',
       },
-      { status: 200 } // HTTP 200 = OK
+      { status: 200 }
     );
     
   } catch (error) {
     // =======================================================================
     // FEHLERBEHANDLUNG
-    // Wenn etwas beim Research schiefgeht
     // =======================================================================
     
     console.error('Fehler beim Research:', error);
     
-    // Bestimme die Fehlermeldung
     let errorMessage = 'Ein unerwarteter Fehler ist aufgetreten.';
     let statusCode = 500;
     
     if (error instanceof Error) {
       errorMessage = error.message;
       
-      // Spezifische Fehlerbehandlung
       if (errorMessage.includes('401')) {
         errorMessage = 'API Authentifizierung fehlgeschlagen. Bitte prüfe deinen OPENROUTER_API_KEY.';
         statusCode = 401;
@@ -217,6 +264,159 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 }
 
 /**
+ * =============================================================================
+ * HELFERFUNKTION: Batch Request (Mehrere Strains)
+ * =============================================================================
+ * 
+ * Verarbeitet ein Array von Strains nacheinander mit Rate-Limiting.
+ * Selbst wenn einzelne Strains fehlschlagen, werden die anderen verarbeitet.
+ */
+async function handleBatchRequest(
+  strains: Array<{ name: string; producer?: string; thcContent?: string }>,
+  apiKey: string
+): Promise<NextResponse> {
+  
+  // =======================================================================
+  // SCHRITT 1: Validierung
+  // =======================================================================
+  
+  // Prüfe, ob das Array nicht leer ist
+  if (strains.length === 0) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Das "strains" Array darf nicht leer sein.',
+      },
+      { status: 400 }
+    );
+  }
+  
+  // Prüfe, ob nicht zu viele Strains auf einmal angefragt werden
+  const MAX_BATCH_SIZE = 20;
+  if (strains.length > MAX_BATCH_SIZE) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: `Zu viele Strains. Maximum sind ${MAX_BATCH_SIZE} pro Batch-Request.`,
+      },
+      { status: 400 }
+    );
+  }
+  
+  // Validiere jeden Eintrag im Array
+  for (let i = 0; i < strains.length; i++) {
+    const strain = strains[i];
+    
+    if (!strain.name || typeof strain.name !== 'string' || strain.name.trim().length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Ungültiger Eintrag bei Index ${i}: "name" ist erforderlich.`,
+        },
+        { status: 400 }
+      );
+    }
+    
+    if (strain.name.length > 100) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Ungültiger Eintrag bei Index ${i}: Name ist zu lang (max 100 Zeichen).`,
+        },
+        { status: 400 }
+      );
+    }
+  }
+  
+  // =======================================================================
+  // SCHRITT 2: Batch-Research durchführen
+  // =======================================================================
+  
+  try {
+    console.log(`[Batch Research] Starte Verarbeitung von ${strains.length} Strains...`);
+    
+    // Verwende die Batch-Funktion aus dem Research-Service
+    const results = await researchMultipleStrains(
+      strains,
+      apiKey,
+      undefined, // Kein Progress-Callback im API-Endpoint (Client kann nicht darauf zugreifen)
+      {
+        delayBetweenRequests: 1500, // 1.5 Sekunden Pause zwischen Requests
+        abortOnError: false,         // Fahre fort, auch wenn einzelne fehlschlagen
+      }
+    );
+    
+    // =======================================================================
+    // SCHRITT 3: Ergebnisse aufbereiten
+    // =======================================================================
+    
+    // Erstelle eine Zusammenfassung
+    const successful = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success).length;
+    
+    // Formatiere die Ergebnisse für die Response
+    const formattedResults = results.map(result => ({
+      success: result.success,
+      requestedName: result.requestedName,
+      strain: result.strain,
+      error: result.error,
+    }));
+    
+    console.log(`[Batch Research] Abgeschlossen: ${successful} erfolgreich, ${failed} fehlgeschlagen`);
+    
+    return NextResponse.json(
+      {
+        success: true,
+        data: formattedResults,
+        summary: {
+          total: results.length,
+          successful,
+          failed,
+        },
+        message: `Batch-Research abgeschlossen: ${successful} von ${results.length} Strains erfolgreich recherchiert.`,
+        source: 'OpenRouter API (Kimi K2.5)',
+      },
+      { status: 200 }
+    );
+    
+  } catch (error) {
+    // =======================================================================
+    // FEHLERBEHANDLUNG
+    // =======================================================================
+    
+    console.error('Fehler beim Batch-Research:', error);
+    
+    let errorMessage = 'Ein unerwarteter Fehler ist beim Batch-Research aufgetreten.';
+    let statusCode = 500;
+    
+    if (error instanceof Error) {
+      errorMessage = error.message;
+      
+      if (errorMessage.includes('401')) {
+        errorMessage = 'API Authentifizierung fehlgeschlagen. Bitte prüfe deinen OPENROUTER_API_KEY.';
+        statusCode = 401;
+      } else if (errorMessage.includes('429')) {
+        errorMessage = 'API Rate Limit erreicht. Bitte warte einen Moment und versuche es mit weniger Strains.';
+        statusCode = 429;
+      } else if (errorMessage.includes('Netzwerkfehler')) {
+        errorMessage = 'Verbindungsproblem zu OpenRouter. Bitte prüfe deine Internetverbindung.';
+        statusCode = 503;
+      }
+    }
+    
+    return NextResponse.json(
+      {
+        success: false,
+        error: errorMessage,
+        message: 'Das Batch-Research konnte nicht durchgeführt werden.',
+        help: 'Wenn das Problem weiterhin besteht, versuche es mit weniger Strains oder prüfe deinen API Key.',
+      },
+      { status: statusCode }
+    );
+  }
+}
+
+/**
  * GET Handler - Information über den Endpoint
  * 
  * Diese Funktion wird aufgerufen, wenn jemand einen GET-Request
@@ -230,23 +430,49 @@ export async function GET(): Promise<NextResponse> {
   return NextResponse.json(
     {
       message: 'Strain Deep Research API',
-      version: '2.0',
+      version: '2.1',
       poweredBy: 'OpenRouter API (Kimi K2.5)',
       status: apiKeyConfigured ? 'ready' : 'configuration_missing',
+      features: ['single', 'batch'],
       usage: {
         method: 'POST',
         endpoint: '/api/research',
-        body: {
-          name: 'string (required) - Name des Strains',
-          producer: 'string (optional) - Hersteller/Züchter',
-          thcContent: 'string (optional) - THC-Gehalt, z.B. "27%"',
+        single: {
+          body: {
+            name: 'string (required) - Name des Strains',
+            producer: 'string (optional) - Hersteller/Züchter',
+            thcContent: 'string (optional) - THC-Gehalt, z.B. "27%"',
+          },
+        },
+        batch: {
+          body: {
+            strains: 'array (required) - Array von Strain-Objekten',
+            'strains[].name': 'string (required) - Name des Strains',
+            'strains[].producer': 'string (optional) - Hersteller/Züchter',
+            'strains[].thcContent': 'string (optional) - THC-Gehalt',
+          },
+          limits: {
+            maxBatchSize: 20,
+            delayBetweenRequests: '1.5 Sekunden (Rate-Limiting)',
+          },
         },
       },
-      example: {
-        request: {
-          name: 'Alien Mints Huala',
-          producer: 'Seed Junky Genetics',
-          thcContent: '27%',
+      examples: {
+        single: {
+          request: {
+            name: 'Alien Mints Huala',
+            producer: 'Seed Junky Genetics',
+            thcContent: '27%',
+          },
+        },
+        batch: {
+          request: {
+            strains: [
+              { name: 'Alien Mints Huala', producer: 'Seed Junky', thcContent: '27%' },
+              { name: 'OG Kush' },
+              { name: 'Blue Dream', thcContent: '20%' },
+            ],
+          },
         },
       },
       configuration: {

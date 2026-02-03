@@ -579,6 +579,293 @@ export function simulateDelay(ms: number): Promise<void> {
 
 /**
  * ============================================================================
+ * BATCH RESEARCH FUNKTIONEN
+ * ============================================================================
+ * 
+ * Diese Funktionen ermöglichen die gleichzeitige Recherche mehrerer Strains.
+ * Sie sind nützlich für das Batch-Processing im Import-Modal.
+ * 
+ * WICHTIG: OpenRouter API hat Rate-Limits, daher werden Strains nacheinander
+ * mit einer kleinen Pause verarbeitet.
+ */
+
+/**
+ * Einzelnes Ergebnis der Batch-Recherche
+ * Enthält entweder den erfolgreich recherchierten Strain oder einen Fehler
+ */
+export interface BatchResearchResult {
+  /** Der ursprünglich angefragte Name des Strains */
+  requestedName: string;
+  /** Das recherchierte Strain-Objekt (nur bei success = true) */
+  strain?: Strain;
+  /** Fehlermeldung (nur bei success = false) */
+  error?: string;
+  /** Ob die Recherche erfolgreich war */
+  success: boolean;
+  /** Zeitpunkt der Recherche */
+  processedAt: Date;
+}
+
+/**
+ * Status eines einzelnen Items in der Batch-Verarbeitung
+ */
+export type BatchItemStatus = 'pending' | 'processing' | 'completed' | 'error' | 'skipped';
+
+/**
+ * Ein einzelnes Item in der Batch-Liste
+ */
+export interface BatchResearchItem {
+  /** Eindeutige ID für dieses Item */
+  id: string;
+  /** Der Name des zu recherchierenden Strains */
+  name: string;
+  /** Optional: Hersteller/Züchter */
+  producer?: string;
+  /** Optional: THC-Gehalt */
+  thcContent?: string;
+  /** Aktueller Status des Items */
+  status: BatchItemStatus;
+  /** Das recherchierte Ergebnis (nur wenn status = 'completed') */
+  result?: Strain;
+  /** Fehlermeldung (nur wenn status = 'error') */
+  error?: string;
+}
+
+/**
+ * Fortschritts-Callback für Batch-Research
+ * Wird nach jedem verarbeiteten Strain aufgerufen, um die UI zu aktualisieren
+ */
+export type BatchProgressCallback = (
+  /** Aktueller Fortschritt (0 bis 1) */
+  progress: number,
+  /** Anzahl bereits verarbeiteter Items */
+  completed: number,
+  /** Gesamtanzahl der Items */
+  total: number,
+  /** Das gerade verarbeitete Item */
+  currentItem: BatchResearchItem,
+  /** Alle Items mit aktuellem Status */
+  allItems: BatchResearchItem[]
+) => void;
+
+/**
+ * Konfiguration für das Batch-Research
+ */
+export interface BatchResearchConfig {
+  /** Pause in Millisekunden zwischen zwei Requests (Default: 1000ms) */
+  delayBetweenRequests?: number;
+  /** Ob bei einem Fehler abgebrochen werden soll (Default: false) */
+  abortOnError?: boolean;
+  /** Max. Anzahl gleichzeitiger Requests (Default: 1 für Rate-Limiting) */
+  concurrency?: number;
+}
+
+/**
+ * ============================================================================
+ * HAUPTFUNKTION: researchMultipleStrains
+ * ============================================================================
+ * 
+ * Recherchiert mehrere Strains nacheinander mit Rate-Limiting.
+ * 
+ * @param strains - Array von Strain-Objekten mit Name und optionalen Details
+ * @param apiKey - Der OpenRouter API Key
+ * @param onProgress - Optionaler Callback für Fortschritts-Updates
+ * @param config - Optionale Konfiguration für das Batch-Processing
+ * @returns Array von BatchResearchResult mit allen Ergebnissen
+ * 
+ * @example
+ * ```typescript
+ * const results = await researchMultipleStrains(
+ *   [
+ *     { name: "OG Kush", producer: "Unknown" },
+ *     { name: "Blue Dream", thcContent: "20%" }
+ *   ],
+ *   apiKey,
+ *   (progress, completed, total, current, all) => {
+ *     console.log(`${completed}/${total} fertig`);
+ *   }
+ * );
+ * ```
+ */
+export async function researchMultipleStrains(
+  strains: Array<{ name: string; producer?: string; thcContent?: string }>,
+  apiKey: string,
+  onProgress?: BatchProgressCallback,
+  config: BatchResearchConfig = {}
+): Promise<BatchResearchResult[]> {
+  
+  // =======================================================================
+  // SCHRITT 1: Konfiguration mit Defaults
+  // =======================================================================
+  const {
+    delayBetweenRequests = 1000,  // 1 Sekunde Pause zwischen Requests
+    abortOnError = false,          // Nicht abbrechen bei Fehlern
+    concurrency = 1,               // Nacheinander verarbeiten (Rate-Limiting)
+  } = config;
+
+  // Prüfe, ob Strains vorhanden sind
+  if (!strains || strains.length === 0) {
+    return [];
+  }
+
+  // Prüfe, ob API Key vorhanden ist
+  if (!apiKey) {
+    throw new Error('OPENROUTER_API_KEY ist nicht konfiguriert.');
+  }
+
+  // =======================================================================
+  // SCHRITT 2: Initialisiere Ergebnis-Array
+  // =======================================================================
+  const results: BatchResearchResult[] = [];
+  
+  // Initialisiere alle Items mit Status 'pending'
+  const items: BatchResearchItem[] = strains.map((strain, index) => ({
+    id: `batch-${index}-${Date.now()}`,
+    name: strain.name,
+    producer: strain.producer,
+    thcContent: strain.thcContent,
+    status: 'pending',
+  }));
+
+  // =======================================================================
+  // SCHRITT 3: Verarbeite alle Strains nacheinander
+  // =======================================================================
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    
+    // Aktualisiere Status zu 'processing'
+    item.status = 'processing';
+    
+    // Rufe Progress-Callback auf (falls vorhanden)
+    const progress = i / items.length;
+    if (onProgress) {
+      onProgress(progress, i, items.length, item, [...items]);
+    }
+
+    try {
+      // ===================================================================
+      // SCHRITT 4: Führe Research für diesen Strain durch
+      // ===================================================================
+      const strain = await researchStrain(
+        item.name,
+        item.producer,
+        item.thcContent,
+        apiKey
+      );
+
+      // Speichere Erfolg
+      item.status = 'completed';
+      item.result = strain;
+      
+      results.push({
+        requestedName: item.name,
+        strain,
+        success: true,
+        processedAt: new Date(),
+      });
+
+    } catch (error) {
+      // ===================================================================
+      // SCHRITT 5: Fehlerbehandlung
+      // ===================================================================
+      const errorMessage = error instanceof Error 
+        ? error.message 
+        : 'Unbekannter Fehler bei der Recherche';
+
+      console.error(`Fehler bei "${item.name}":`, errorMessage);
+
+      // Speichere Fehler
+      item.status = 'error';
+      item.error = errorMessage;
+      
+      results.push({
+        requestedName: item.name,
+        error: errorMessage,
+        success: false,
+        processedAt: new Date(),
+      });
+
+      // Prüfe, ob wir abbrechen sollen
+      if (abortOnError) {
+        break;
+      }
+    }
+
+    // ===================================================================
+    // SCHRITT 6: Rate-Limiting Pause
+    // ===================================================================
+    // Wir warten zwischen den Requests, um Rate-Limits zu vermeiden
+    // Außer beim letzten Item
+    if (i < items.length - 1 && delayBetweenRequests > 0) {
+      await simulateDelay(delayBetweenRequests);
+    }
+
+    // Finaler Progress-Update nach Abschluss dieses Items
+    if (onProgress) {
+      onProgress(
+        (i + 1) / items.length,
+        i + 1,
+        items.length,
+        item,
+        [...items]
+      );
+    }
+  }
+
+  // =======================================================================
+  // SCHRITT 7: Rückgabe aller Ergebnisse
+  // =======================================================================
+  return results;
+}
+
+/**
+ * Hilfsfunktion: Parsed einen mehrzeiligen Text in ein Array von Strain-Namen
+ * Entfernt leere Zeilen und duplikate, trimmt Whitespace
+ * 
+ * @param text - Der Text aus der Textarea (einer pro Zeile)
+ * @returns Array von eindeutigen, nicht-leeren Strain-Namen
+ * 
+ * @example
+ * ```typescript
+ * const names = parseStrainList(`
+ *   OG Kush
+ *   Blue Dream
+ *   
+ *   OG Kush  // Duplikat wird entfernt
+ * `);
+ * // Result: ["OG Kush", "Blue Dream"]
+ * ```
+ */
+export function parseStrainList(text: string): string[] {
+  if (!text || text.trim().length === 0) {
+    return [];
+  }
+
+  // Teile den Text in Zeilen auf
+  const lines = text.split('\n');
+  
+  // Bereinige jede Zeile und entferne leere
+  const names = lines
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
+  
+  // Entferne Duplikate (Case-Insensitive)
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  
+  for (const name of names) {
+    const lowerName = name.toLowerCase();
+    if (!seen.has(lowerName)) {
+      seen.add(lowerName);
+      unique.push(name); // Original-Case beibehalten
+    }
+  }
+  
+  return unique;
+}
+
+/**
+ * ============================================================================
  * EXPORTE
  * ============================================================================
  * 
